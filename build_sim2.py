@@ -35,6 +35,7 @@ HTML = r"""<!DOCTYPE html>
         .btn-reset{background:#718093;color:#fff}
         .stat-row{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px dashed #3d4852;font-size:12px}
         .sv{font-weight:700;color:#00a8ff;font-family:monospace}
+        .sv-ok{color:#2ecc71} .sv-warn{color:#f1c40f} .sv-danger{color:#e74c3c}
         .chk-row{display:flex;align-items:center;gap:8px;padding:3px 0;font-size:11px}
         .chk{width:16px;height:16px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff}
         .chk-ok{background:#27ae60}.chk-fail{background:#e74c3c}.chk-wait{background:#636e72}
@@ -98,6 +99,14 @@ HTML = r"""<!DOCTYPE html>
     </div>
 
     <div class="panel">
+        <div class="panel-title">Early Warning System (EWS)</div>
+        <div class="stat-row"><span>Target Zone</span><span class="sv">Settlement Alpha</span></div>
+        <div class="stat-row"><span>Zone Status</span><span id="ewsStatus" class="sv sv-ok">SAFE</span></div>
+        <div class="stat-row"><span>Flood Distance</span><span id="ewsDist" class="sv">-- m</span></div>
+        <div class="stat-row"><span>Evacuation Threshold</span><span class="sv">50.0 m</span></div>
+    </div>
+
+    <div class="panel">
         <div class="panel-title">Hydraulic Metrics</div>
         <div class="stat-row"><span>Sinuosity Index</span><span id="statSin" class="sv">--</span></div>
         <div class="stat-row"><span>Peak Depth</span><span id="statPeak" class="sv">0.00 m</span></div>
@@ -134,6 +143,8 @@ const ROWS=240, COLS=240, CELL_M=5.0, AREA=25.0, RIVER_BED=32.0, HWY=45.0, DEPTH
 const dem=new Float32Array(N), wseArr=new Float32Array(N), depArr=new Float32Array(N);
 const chanMask=new Uint8Array(N), watMask=new Uint8Array(N), basinId=new Int16Array(N).fill(-1);
 
+const resZone = { c: 135, r: 175, radius: 8 }; // Residential Zone (Settlement Alpha)
+
 const cw=document.getElementById('cw'), tip=document.getElementById('tip');
 const bC=document.getElementById('bgCanvas'), bX=bC.getContext('2d',{alpha:false});
 const oC=document.getElementById('overlayCanvas'), oX=oC.getContext('2d');
@@ -148,8 +159,29 @@ const bgImg=new Image();
 bgImg.onload=()=>{
     bX.drawImage(bgImg,0,0,bC.width,bC.height);
     initTerrain();
+    drawResidentialZone();
 };
 bgImg.src="data:image/jpeg;base64,IMG_B64_PLACEHOLDER";
+
+function drawResidentialZone() {
+    let sx = oC.width/COLS, sy = oC.height/ROWS;
+    let cx = resZone.c * sx, cy = resZone.r * sy, rad = resZone.radius * sx;
+    
+    oX.strokeStyle = 'rgba(241, 196, 15, 0.9)';
+    oX.lineWidth = 2;
+    oX.setLineDash([4, 4]);
+    oX.beginPath();
+    oX.arc(cx, cy, rad, 0, 2*Math.PI);
+    oX.stroke();
+    oX.setLineDash([]);
+    oX.fillStyle = 'rgba(241, 196, 15, 0.2)';
+    oX.fill();
+    
+    oX.fillStyle = '#fff';
+    oX.font = 'bold 11px sans-serif';
+    oX.textAlign = 'center';
+    oX.fillText("SETTLEMENT", cx, cy - rad - 6);
+}
 
 function initTerrain(){
     // Bilinear upsample from 30x30 to 240x240
@@ -439,9 +471,17 @@ function startPhase2(){
 
 function renderFlood(){
     let vol=0, peak=0, cells=0;
+    let minDistSq = Infinity;
+    let isFlooded = false;
+
     for(let i=0;i<N;i++){
         let d = depArr[i], px=i*4;
         if(d>DEPTH_MIN){
+            let r = Math.floor(i/COLS), c = i%COLS;
+            let distSq = (r - resZone.r)**2 + (c - resZone.c)**2;
+            if(distSq < minDistSq) minDistSq = distSq;
+            if(distSq <= resZone.radius**2) isFlooded = true;
+
             let t=Math.min(d/3.0,1.0);
             wImg.data[px]=0;
             wImg.data[px+1]=Math.round(255*(1-t));
@@ -462,6 +502,28 @@ function renderFlood(){
     document.getElementById('statArea').textContent=(cells*AREA/1e6).toFixed(3)+' km\u00b2';
     document.getElementById('statVol').textContent=vol.toLocaleString(undefined,{maximumFractionDigits:0})+' m\u00b3';
     document.getElementById('statPeak').textContent=peak.toFixed(2)+' m';
+
+    // Early Warning System Updates
+    let distMeters = Math.sqrt(minDistSq) * CELL_M;
+    let edgeDist = Math.max(0, distMeters - (resZone.radius * CELL_M));
+    
+    let ewsStatus = document.getElementById('ewsStatus');
+    let ewsDist = document.getElementById('ewsDist');
+    
+    if (isFlooded) {
+        ewsStatus.textContent = 'DANGER (INUNDATED)';
+        ewsStatus.className = 'sv sv-danger';
+        ewsDist.textContent = '0.0 m';
+    } else if (edgeDist < 50.0) {
+        ewsStatus.textContent = 'WARNING (EVACUATE)';
+        ewsStatus.className = 'sv sv-warn';
+        ewsDist.textContent = edgeDist.toFixed(1) + ' m';
+    } else {
+        ewsStatus.textContent = 'SAFE';
+        ewsStatus.className = 'sv sv-ok';
+        if (minDistSq === Infinity) ewsDist.textContent = '-- m';
+        else ewsDist.textContent = edgeDist.toFixed(1) + ' m';
+    }
 }
 
 function scrubTime(v){
